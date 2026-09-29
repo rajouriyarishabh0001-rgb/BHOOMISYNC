@@ -10,13 +10,14 @@ from typing import Any
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
+from sqlalchemy import inspect
 from rapidfuzz.fuzz import ratio
 
 from database.base import Base
 from database.connection import database_status, engine
 from database.session import SessionLocal
 from models.core import MapLayer, Property, Role, User
-from models.officer import Department, Permission, RolePermission
+from models.officer import Department, OfficerAssignment, Permission, RolePermission
 from models import sources, citizen
 from models import officer
 from routers.auth import router as auth_router
@@ -35,7 +36,7 @@ from scripts.seed_citizen_portal import _ensure_property_columns
 
 app = FastAPI(title="BHOOMISYNC API", version="0.2.0", description="Synthetic urban land harmonization API. Not an official government platform.")
 cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173").split(",") if origin.strip()]
-app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["Content-Type", "Authorization"])
+app.add_middleware(CORSMiddleware, allow_origins=cors_origins, allow_credentials=True, allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"], allow_headers=["Content-Type", "Authorization"])
 app.include_router(auth_router)
 app.include_router(location_router)
 app.include_router(maps_router)
@@ -51,16 +52,19 @@ app.include_router(citizen_router)
 @app.on_event("startup")
 def initialize_architecture() -> None:
     Base.metadata.create_all(bind=engine)
+    if engine.dialect.name == "sqlite" and "designation" not in {column["name"] for column in inspect(engine).get_columns("users")}:
+        with engine.begin() as connection:
+            connection.exec_driver_sql("ALTER TABLE users ADD COLUMN designation VARCHAR(120)")
     _ensure_property_columns()
     session = SessionLocal()
     try:
-        role_names = ["CITIZEN", "REVENUE_OFFICER", "REGISTRATION_OFFICER", "MUNICIPAL_OFFICER", "PROPERTY_TAX_OFFICER", "GIS_SURVEY_OFFICER", "PLANNING_OFFICER", "DISTRICT_ADMIN", "SUPER_ADMIN"]
+        role_names = ["CITIZEN", "REVENUE_OFFICER", "REGISTRATION_OFFICER", "MUNICIPAL_OFFICER", "ELECTRICITY_OFFICER", "PROPERTY_TAX_OFFICER", "GIS_SURVEY_OFFICER", "PLANNING_OFFICER", "DEPARTMENT_ADMIN", "DISTRICT_ADMIN", "SUPER_ADMIN"]
         existing_roles = {role.name for role in session.query(Role).all()}
         for role_name in role_names:
             if role_name not in existing_roles:
                 session.add(Role(name=role_name, description=f"BHOOMISYNC {role_name.replace('_', ' ').title()} role"))
         session.flush()
-        departments = [("REV", "Revenue", "राजस्व"), ("REG", "Registration", "पंजीयन"), ("MUNICIPAL", "Municipal", "नगरपालिका"), ("TAX", "Property Tax", "संपत्ति कर"), ("GIS", "GIS Survey", "जीआईएस सर्वेक्षण"), ("PLANNING", "Planning", "नियोजन"), ("ADMIN", "District Administration", "जिला प्रशासन")]
+        departments = [("REV", "Revenue", "राजस्व"), ("REG", "Registration", "पंजीयन"), ("MUNICIPAL", "Municipal", "नगरपालिका"), ("ELECTRICITY", "Electricity", "विद्युत"), ("TAX", "Property Tax", "संपत्ति कर"), ("GIS", "GIS Survey", "जीआईएस सर्वेक्षण"), ("PLANNING", "Planning", "नियोजन"), ("ADMIN", "District Administration", "जिला प्रशासन")]
         existing_departments = {item.department_code for item in session.query(Department).all()}
         for code, name, name_hi in departments:
             if code not in existing_departments:
@@ -75,20 +79,33 @@ def initialize_architecture() -> None:
         all_permissions = {item.code: item for item in session.query(Permission).all()}
         existing_pairs = {(item.role_id, item.permission_id) for item in session.query(RolePermission).all()}
         for role_name, role in all_roles.items():
-            role_permissions = set(permission_names) if role_name == "SUPER_ADMIN" else {"PROPERTY_VIEW", "RECORD_VIEW", "GIS_VIEW", "AI_VIEW", "CONFLICT_VIEW", "VERIFICATION_VIEW"}
-            if role_name.endswith("OFFICER"):
-                role_permissions.update({"AI_MATCH", "AI_SCAN", "SATELLITE_VIEW", "SATELLITE_ANALYZE"} if role_name == "GIS_SURVEY_OFFICER" else {"PROPERTY_EDIT", "VERIFICATION_APPROVE"})
-            if role_name == "DISTRICT_ADMIN":
-                role_permissions.update({"CONFLICT_RESOLVE", "REPORT_VIEW", "REPORT_EXPORT", "AUDIT_VIEW", "AI_SCAN", "SATELLITE_ANALYZE"})
+            if role_name in {"SUPER_ADMIN", "DISTRICT_ADMIN"}:
+                role_permissions = set(permission_names)
+            elif role_name in {"DEPARTMENT_ADMIN"}:
+                role_permissions = {"PROPERTY_VIEW", "PROPERTY_EDIT", "RECORD_VIEW", "RECORD_UPLOAD", "CONFLICT_VIEW", "VERIFICATION_VIEW", "VERIFICATION_APPROVE", "REPORT_VIEW", "USER_MANAGE"}
+            elif role_name == "GIS_SURVEY_OFFICER":
+                role_permissions = {"PROPERTY_VIEW", "RECORD_VIEW", "GIS_VIEW", "GIS_EDIT", "GIS_ANALYZE", "AI_VIEW", "AI_MATCH", "AI_SCAN", "SATELLITE_VIEW", "SATELLITE_ANALYZE", "CONFLICT_VIEW", "VERIFICATION_VIEW", "VERIFICATION_APPROVE"}
+            elif role_name.endswith("OFFICER"):
+                role_permissions = {"PROPERTY_VIEW", "PROPERTY_EDIT", "RECORD_VIEW", "CONFLICT_VIEW", "VERIFICATION_VIEW", "VERIFICATION_APPROVE"}
+            elif role_name == "CITIZEN":
+                role_permissions = {"PROPERTY_VIEW"}
+            else:
+                role_permissions = set()
+            if role_name == "DEPARTMENT_ADMIN":
+                role_permissions.update({"PROPERTY_EDIT", "RECORD_UPLOAD", "VERIFICATION_APPROVE", "REPORT_VIEW", "USER_MANAGE"})
+            for existing in session.query(RolePermission).filter_by(role_id=role.id).all():
+                permission_code = next((code for code, permission in all_permissions.items() if permission.id == existing.permission_id), None)
+                if permission_code not in role_permissions:
+                    session.delete(existing)
             for code in role_permissions:
                 pair = (role.id, all_permissions[code].id)
                 if pair not in existing_pairs:
                     session.add(RolePermission(role_id=role.id, permission_id=all_permissions[code].id))
-        demo_users = [("revenue.demo@bhoomisync.local", "Revenue Officer", "REVENUE_OFFICER", "Revenue"), ("registration.demo@bhoomisync.local", "Registration Officer", "REGISTRATION_OFFICER", "Registration"), ("municipal.demo@bhoomisync.local", "Municipal Officer", "MUNICIPAL_OFFICER", "Municipal"), ("gis.demo@bhoomisync.local", "GIS Survey Officer", "GIS_SURVEY_OFFICER", "GIS"), ("planning.demo@bhoomisync.local", "Planning Officer", "PLANNING_OFFICER", "Planning"), ("admin.demo@bhoomisync.local", "District Admin", "DISTRICT_ADMIN", "District Administration")]
+        demo_users = [("revenue.demo@bhoomisync.local", "Revenue Officer", "REVENUE_OFFICER", "Revenue"), ("registration.demo@bhoomisync.local", "Registration Officer", "REGISTRATION_OFFICER", "Registration"), ("municipal.demo@bhoomisync.local", "Municipal Officer", "MUNICIPAL_OFFICER", "Municipal"), ("electricity.demo@bhoomisync.local", "Electricity Officer", "ELECTRICITY_OFFICER", "Electricity"), ("propertytax.demo@bhoomisync.local", "Property Tax Officer", "PROPERTY_TAX_OFFICER", "Property Tax"), ("gis.demo@bhoomisync.local", "GIS Survey Officer", "GIS_SURVEY_OFFICER", "GIS"), ("planning.demo@bhoomisync.local", "Planning Officer", "PLANNING_OFFICER", "Planning"), ("municipal.admin.demo@bhoomisync.local", "Municipal Department Admin", "DEPARTMENT_ADMIN", "Municipal"), ("admin.demo@bhoomisync.local", "District Admin", "DISTRICT_ADMIN", "District Administration")]
         existing_emails = {item.email for item in session.query(User).all()}
         for email, name, role_name, department in demo_users:
             if email not in existing_emails:
-                session.add(User(name=name, email=email, password_hash=hash_password("BhoomiSyncDemo!2026"), role=all_roles[role_name], department=department, is_active=True, is_verified=True))
+                session.add(User(name=name, email=email, password_hash=hash_password("BhoomiSyncDemo!2026"), role=all_roles[role_name], department=department, designation=name, is_active=True, is_verified=True))
         map_provider = os.getenv("MAP_PROVIDER", "google")
         satellite_provider = os.getenv("SATELLITE_PROVIDER", map_provider)
         street_url = os.getenv("MAP_TILE_URL") or "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -104,6 +121,26 @@ def initialize_architecture() -> None:
             seed_normalized_database()
     finally:
         session.close()
+    assignment_session = SessionLocal()
+    try:
+        department_officers = {
+            "municipal": "municipal.demo@bhoomisync.local", "registration": "registration.demo@bhoomisync.local",
+            "revenue": "revenue.demo@bhoomisync.local", "electricity": "electricity.demo@bhoomisync.local",
+            "property_tax": "propertytax.demo@bhoomisync.local", "gis": "gis.demo@bhoomisync.local",
+            "planning": "planning.demo@bhoomisync.local",
+        }
+        properties = assignment_session.query(Property).all()
+        for department, email in department_officers.items():
+            officer_user = assignment_session.query(User).filter_by(email=email).first()
+            if not officer_user:
+                continue
+            existing = {(item.property_id, item.department) for item in assignment_session.query(OfficerAssignment).filter_by(officer_id=officer_user.id).all()}
+            assignment_session.add_all(OfficerAssignment(officer_id=officer_user.id, department=department, property_id=property_row.id) for property_row in properties if (property_row.id, department) not in existing)
+        assignment_session.commit()
+    finally:
+        assignment_session.close()
+    from scripts.seed_database import seed_departmental_records
+    seed_departmental_records()
     # The public catalogue is separate from officer records and is idempotent.
     from scripts.seed_citizen_portal import run as seed_citizen_portal
     seed_citizen_portal()

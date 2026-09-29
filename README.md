@@ -32,6 +32,32 @@ records, `/api/maps/layers`, `/api/maps/config`, `/api/maps/viewport`,
 `/api/properties/nearby`, `/api/location`, `/api/satellite/layers`, and
 PostGIS-backed spatial queries when PostgreSQL is active.
 
+## Officer portal
+
+All departments use the shared `/officer/login` page and common officer shell.
+After authentication the client reads `/api/officer/me` and opens the
+department dashboard from the backend profile. Department dashboard data,
+property access, GIS requests, and officer actions are filtered and authorized
+by backend role, permission, department, and `officer_assignments`.
+
+Demo password for all seeded officer accounts: `BhoomiSyncDemo!2026`.
+
+| Department | Demo email | Dashboard |
+| --- | --- | --- |
+| Municipal | `municipal.demo@bhoomisync.local` | `/officer/municipal` |
+| Registration | `registration.demo@bhoomisync.local` | `/officer/registration` |
+| Revenue | `revenue.demo@bhoomisync.local` | `/officer/revenue` |
+| Electricity | `electricity.demo@bhoomisync.local` | `/officer/electricity` |
+| Property Tax | `propertytax.demo@bhoomisync.local` | `/officer/property-tax` |
+| GIS / Survey | `gis.demo@bhoomisync.local` | `/officer/gis` |
+| Urban Planning | `planning.demo@bhoomisync.local` | `/officer/planning` |
+| Municipal Department Admin | `municipal.admin.demo@bhoomisync.local` | `/officer/municipal` |
+
+Department administration APIs are under `/api/officer/admin/` and require a
+department-admin role plus `USER_MANAGE`. Apply schema changes to a deployed
+database with `alembic upgrade head`; local SQLite startup adds the new
+designation column and seeds demo assignments idempotently.
+
 ## Run frontend
 
 ```powershell

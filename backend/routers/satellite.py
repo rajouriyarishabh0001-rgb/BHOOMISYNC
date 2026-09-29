@@ -2,19 +2,31 @@ from __future__ import annotations
 
 import os
 from datetime import date
-from typing import Annotated
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ai.satellite_analysis import unavailable_analysis
 from database.session import get_db
-from models.core import SatelliteObservation
+from models.core import Property, SatelliteObservation
+from routers.officer import require_assigned_property, require_department_access
+from security import current_user
 
 router = APIRouter(prefix="/api/satellite", tags=["satellite"])
 officer_router = APIRouter(prefix="/api/officer/satellite", tags=["officer satellite"])
+Officer = Annotated[Any, Depends(current_user)]
+
+
+def require_assigned_gis_parcel(parcel_id: str, user: Any, session: Session) -> Property:
+    require_department_access(user, "gis")
+    property_row = session.scalar(select(Property).where(Property.parcel_id == parcel_id.upper()))
+    if not property_row:
+        raise HTTPException(404, "Property was not found.")
+    require_assigned_property(user, session, property_row, "gis")
+    return property_row
 
 
 class SatelliteAnalysisRequest(BaseModel):
@@ -51,20 +63,24 @@ def analyze(request: SatelliteAnalysisRequest) -> dict:
 
 
 @officer_router.get("/history/{parcel_id}")
-def officer_satellite_history(parcel_id: str, session: Annotated[Session, Depends(get_db)]) -> dict:
+def officer_satellite_history(parcel_id: str, user: Officer, session: Annotated[Session, Depends(get_db)]) -> dict:
+    require_assigned_gis_parcel(parcel_id, user, session)
     return history(parcel_id, session)
 
 
 @officer_router.post("/analyze")
-def officer_satellite_analyze(request: SatelliteAnalysisRequest) -> dict:
+def officer_satellite_analyze(request: SatelliteAnalysisRequest, user: Officer, session: Annotated[Session, Depends(get_db)]) -> dict:
+    require_assigned_gis_parcel(request.parcel_id, user, session)
     return analyze(request)
 
 
 @officer_router.post("/compare")
-def officer_satellite_compare(payload: dict) -> dict:
+def officer_satellite_compare(payload: dict, user: Officer, session: Annotated[Session, Depends(get_db)]) -> dict:
+    require_assigned_gis_parcel(str(payload.get("parcel_id", "")), user, session)
     return {"success": True, "data": {"parcel_id": payload.get("parcel_id"), "analysis_status": "QUEUED", "possible_change": "Potential physical/land-use change detected.", "recommendation": "Field verification required."}}
 
 
 @officer_router.get("/{parcel_id}")
-def officer_parcel_satellite(parcel_id: str, session: Annotated[Session, Depends(get_db)]) -> dict:
+def officer_parcel_satellite(parcel_id: str, user: Officer, session: Annotated[Session, Depends(get_db)]) -> dict:
+    require_assigned_gis_parcel(parcel_id, user, session)
     return parcel_observations(parcel_id, session)

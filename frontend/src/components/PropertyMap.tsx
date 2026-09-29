@@ -19,21 +19,22 @@ function FitSelected({ geometry, latitude, longitude, focusToken }: { geometry: 
   return null;
 }
 
-function ViewportLoader({ onLoad }: { onLoad: (items: Property[]) => void }) {
+function ViewportLoader({ onLoad, officer }: { onLoad: (items: Property[]) => void; officer: boolean }) {
   const map = useMap();
   useEffect(() => {
     const load = () => {
       const bounds = map.getBounds();
-      api.viewport({ north: bounds.getNorth(), south: bounds.getSouth(), east: bounds.getEast(), west: bounds.getWest() }).then(result => onLoad(result.items)).catch(() => onLoad([]));
+      const extent = { north: bounds.getNorth(), south: bounds.getSouth(), east: bounds.getEast(), west: bounds.getWest() };
+      (officer ? api.officerGisViewport(extent) : api.viewport(extent)).then(result => onLoad(result.items)).catch(() => onLoad([]));
     };
     load();
     map.on('moveend', load);
     return () => { map.off('moveend', load); };
-  }, [map, onLoad]);
+  }, [map, onLoad, officer]);
   return null;
 }
 
-function GoogleMapView({ mode, selectedId, onSelect, onLoad }: { mode: 'street' | 'satellite' | 'hybrid' | 'terrain'; selectedId: string | null; onSelect: (parcelId: string) => void; onLoad: (items: Property[]) => void }) {
+function GoogleMapView({ mode, selectedId, onSelect, onLoad, officer }: { mode: 'street' | 'satellite' | 'hybrid' | 'terrain'; selectedId: string | null; onSelect: (parcelId: string) => void; onLoad: (items: Property[]) => void; officer: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<google.maps.Map>();
   const markersRef = useRef<google.maps.Marker[]>([]);
@@ -51,20 +52,22 @@ function GoogleMapView({ mode, selectedId, onSelect, onLoad }: { mode: 'street' 
         if (!bounds) return;
         const northeast = bounds.getNorthEast();
         const southwest = bounds.getSouthWest();
-        api.viewport({ north: northeast.lat(), south: southwest.lat(), east: northeast.lng(), west: southwest.lng() }).then(result => onLoad(result.items)).catch(() => onLoad([]));
+        const extent = { north: northeast.lat(), south: southwest.lat(), east: northeast.lng(), west: southwest.lng() };
+        (officer ? api.officerGisViewport(extent) : api.viewport(extent)).then(result => onLoad(result.items)).catch(() => onLoad([]));
       };
       mapRef.current.addListener('idle', loadViewport);
       loadViewport();
     }).catch(() => onLoad([]));
     return () => { cancelled = true; markersRef.current.forEach(marker => marker.setMap(null)); markersRef.current = []; };
-  }, [apiKey, mode, onLoad]);
+  }, [apiKey, mode, onLoad, officer]);
 
   useEffect(() => {
     const map = mapRef.current;
     if (!map) return;
     const bounds = map.getBounds();
     if (!bounds) return;
-    api.viewport({ north: bounds.getNorthEast().lat(), south: bounds.getSouthWest().lat(), east: bounds.getNorthEast().lng(), west: bounds.getSouthWest().lng() }).then(result => {
+    const extent = { north: bounds.getNorthEast().lat(), south: bounds.getSouthWest().lat(), east: bounds.getNorthEast().lng(), west: bounds.getSouthWest().lng() };
+    (officer ? api.officerGisViewport(extent) : api.viewport(extent)).then(result => {
       markersRef.current.forEach(marker => marker.setMap(null));
       markersRef.current = result.items.filter(item => item.latitude !== undefined && item.longitude !== undefined).map(item => {
         const marker = new google.maps.Marker({ map, position: { lat: item.latitude!, lng: item.longitude! }, title: `${item.parcel_id} · ${item.owner_name}` });
@@ -74,7 +77,7 @@ function GoogleMapView({ mode, selectedId, onSelect, onLoad }: { mode: 'street' 
       const selected = result.items.find(item => item.parcel_id === selectedId);
       if (selected?.latitude !== undefined && selected.longitude !== undefined) map.panTo({ lat: selected.latitude, lng: selected.longitude });
     }).catch(() => undefined);
-  }, [selectedId, onSelect]);
+  }, [selectedId, onSelect, officer]);
 
   return <div ref={containerRef} className="google-map" style={{ height: '100%', width: '100%' }} aria-label="Google property map" />;
 }
@@ -101,7 +104,7 @@ export default function PropertyMap({ mode = 'street', config, officer = false, 
   useEffect(() => {
     if (!selectedId) { setSelected(undefined); setLoading(false); return; }
     setLoading(true); setMessage('');
-    api.property(selectedId).then(setSelected).catch(() => { setSelected(undefined); setMessage('Property not found.'); }).finally(() => setLoading(false));
+    (officer ? api.officerGisParcel(selectedId).then(result => result.data) : api.property(selectedId)).then(setSelected).catch(() => { setSelected(undefined); setMessage('Property not found or not assigned to this officer.'); }).finally(() => setLoading(false));
   }, [selectedId]);
 
   const selectParcel = (parcelId: string) => setSearchParams({ parcel: parcelId });
@@ -111,19 +114,19 @@ export default function PropertyMap({ mode = 'street', config, officer = false, 
   };
   const searchNearby = () => {
     if (!selected?.latitude || !selected?.longitude) { setMessage('Property location is unavailable.'); return; }
-    api.nearby(selected.latitude, selected.longitude, 500).then(result => setNearby(result.items)).catch(() => setMessage('Nearby properties are unavailable.'));
+    (officer ? api.officerGisNearby(selected.latitude, selected.longitude, 500) : api.nearby(selected.latitude, selected.longitude, 500)).then(result => setNearby(result.items)).catch(() => setMessage('Nearby properties are unavailable.'));
   };
   const locateMe = () => {
     navigator.geolocation.getCurrentPosition(position => {
       setUserLocation([position.coords.latitude, position.coords.longitude]);
-      api.nearby(position.coords.latitude, position.coords.longitude, 1000).then(result => setNearby(result.items));
+      (officer ? api.officerGisNearby(position.coords.latitude, position.coords.longitude, 1000) : api.nearby(position.coords.latitude, position.coords.longitude, 1000)).then(result => setNearby(result.items));
     }, () => setMessage('Location permission was not granted.'));
   };
 
   return <div className="property-map-shell">
-    {googleKey ? <GoogleMapView mode={activeMode === 'terrain' ? 'street' : activeMode} selectedId={selectedId} onSelect={selectParcel} onLoad={setViewportProperties} /> : <MapContainer center={[23.525, 77.808]} zoom={13} scrollWheelZoom className="leaflet-map">
+    {googleKey ? <GoogleMapView mode={activeMode === 'terrain' ? 'street' : activeMode} selectedId={selectedId} onSelect={selectParcel} onLoad={setViewportProperties} officer={officer} /> : <MapContainer center={[23.525, 77.808]} zoom={13} scrollWheelZoom className="leaflet-map">
       {activeMode === 'satellite' || activeMode === 'hybrid' ? <TileLayer key="satellite" url={satelliteTileUrl} attribution={satelliteAttribution} opacity={activeMode === 'satellite' ? satelliteOpacity : .72} eventHandlers={{ tileerror: () => setSatelliteError(true), tileload: () => setSatelliteError(false) }} /> : <TileLayer key="street" url={config?.street?.tile_url || 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'} attribution="© OpenStreetMap contributors" />}
-      <ViewportLoader onLoad={setViewportProperties} />
+      <ViewportLoader onLoad={setViewportProperties} officer={officer} />
       {selected && <FitSelected geometry={selected.geometry || selected.geojson?.geometry} latitude={selected.latitude} longitude={selected.longitude} focusToken={focusToken} />}
       {viewportProperties.filter(item => item.latitude !== undefined && item.longitude !== undefined).map(item => <Marker key={item.parcel_id} position={[item.latitude!, item.longitude!]} eventHandlers={{ click: () => selectParcel(item.parcel_id) }} />)}
       {nearby.filter(item => item.latitude !== undefined && item.longitude !== undefined).map(item => <Marker key={`nearby-${item.parcel_id}`} position={[item.latitude!, item.longitude!]} eventHandlers={{ click: () => selectParcel(item.parcel_id) }} />)}

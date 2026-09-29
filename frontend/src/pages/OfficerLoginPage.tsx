@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useState } from 'react';
-import { Link, Navigate, useNavigate } from 'react-router-dom';
+import { Link, useNavigate } from 'react-router-dom';
 import { Activity, ArrowRight, Eye, EyeOff, KeyRound, Layers3, LockKeyhole, Map, Satellite, ShieldCheck } from 'lucide-react';
-import { api } from '../services/api';
+import { api, officerHomePath } from '../services/api';
 import './OfficerLoginPage.css';
 import LanguageSelector from '../components/LanguageSelector';
 
@@ -14,12 +14,16 @@ export default function OfficerLoginPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
+  const [checkingSession, setCheckingSession] = useState(true);
 
   useEffect(() => {
-    if (localStorage.getItem('bhoomisync_access_token')) navigate('/officer/dashboard', { replace: true });
+    if (localStorage.getItem('bhoomisync_access_token')) {
+      api.officerMe().then(result => navigate(officerHomePath(result.data.department_key), { replace: true }))
+        .catch(() => { void api.officerLogout().finally(() => setCheckingSession(false)); });
+    }
   }, [navigate]);
 
-  if (localStorage.getItem('bhoomisync_access_token')) return <Navigate to="/officer/dashboard" replace />;
+  if (localStorage.getItem('bhoomisync_access_token') && checkingSession) return <main className="officer-login-page"><div role="status">Checking authenticated officer...</div></main>;
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -29,8 +33,9 @@ export default function OfficerLoginPage() {
     setBusy(true);
     try {
       await api.officerLogin({ email: email.trim(), password });
+      const profile = await api.officerMe();
       setSuccess(true);
-      window.setTimeout(() => navigate('/officer/dashboard', { replace: true }), 450);
+      window.setTimeout(() => navigate(officerHomePath(profile.data.department_key), { replace: true }), 450);
     } catch {
       setError('Invalid Officer ID or password.');
     } finally {
